@@ -1,123 +1,211 @@
-
 from flask import Flask, request, jsonify, render_template
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import json, secrets, string
+import os
+import secrets
+import string
+
+from supabase import create_client
 
 app = Flask(__name__)
-DB = Path("database.json")
 
-def load_db():
-    if not DB.exists():
-        DB.write_text(json.dumps({"keys": []}, indent=2))
-    return json.loads(DB.read_text())
+# Supabase connection
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-def save_db(data):
-    DB.write_text(json.dumps(data, indent=2))
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY
+)
+
 
 def now():
     return datetime.now(timezone.utc)
 
-def parse_iso(s):
-    return datetime.fromisoformat(s.replace("Z","+00:00"))
 
-def status(k):
-    if k["status"] == "revoked":
+def parse_iso(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def get_status(key_data):
+    if key_data["status"] == "revoked":
         return "revoked"
-    if parse_iso(k["expires_at"]) <= now():
+
+    if parse_iso(key_data["expires_at"]) <= now():
         return "expired"
+
     return "active"
+
 
 def make_key():
     alphabet = string.ascii_uppercase + string.digits
-    parts = ["".join(secrets.choice(alphabet) for _ in range(5)) for _ in range(4)]
+    parts = [
+        "".join(secrets.choice(alphabet) for _ in range(5))
+        for _ in range(4)
+    ]
     return "SAM-" + "-".join(parts)
+
 
 @app.get("/")
 def index():
     return render_template("index.html")
 
+
 @app.get("/api/keys")
 def list_keys():
-    data = load_db()
-    for k in data["keys"]:
-        k["status"] = status(k)
-    save_db(data)
-    return jsonify(data["keys"])
+    response = (
+        supabase
+        .table("license_keys")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    keys = response.data or []
+
+    for key in keys:
+        key["status"] = get_status(key)
+
+    return jsonify(keys)
+
 
 @app.post("/api/keys")
 def generate_keys():
     body = request.get_json(silent=True) or {}
+
     try:
         duration = int(body.get("duration_hours", 24))
         quantity = max(1, min(int(body.get("quantity", 1)), 100))
     except Exception:
-        return jsonify({"error":"duration_hours and quantity must be integers"}), 400
-    if duration <= 0 or duration > 24*365:
-        return jsonify({"error":"duration_hours must be between 1 and 8760"}), 400
+        return jsonify({
+            "error": "duration_hours and quantity must be integers"
+        }), 400
 
-    data = load_db()
+    if duration <= 0 or duration > 24 * 365:
+        return jsonify({
+            "error": "duration_hours must be between 1 and 8760"
+        }), 400
+
     created = now()
     result = []
-    existing = {k["key"] for k in data["keys"]}
+
     for _ in range(quantity):
         key = make_key()
-        while key in existing:
-            key = make_key()
-        existing.add(key)
+
         item = {
             "id": secrets.token_hex(8),
             "key": key,
             "status": "active",
             "created_at": created.isoformat(),
-            "expires_at": (created + timedelta(hours=duration)).isoformat(),
+            "expires_at": (
+                created + timedelta(hours=duration)
+            ).isoformat(),
             "device_id": None,
             "last_used": None
         }
-        data["keys"].append(item)
+
+        supabase.table("license_keys").insert(item).execute()
         result.append(item)
-    save_db(data)
+
     return jsonify(result), 201
+
 
 @app.post("/api/keys/<key>/revoke")
 def revoke(key):
-    data = load_db()
-    for k in data["keys"]:
-        if k["key"] == key:
-            k["status"] = "revoked"
-            save_db(data)
-            return jsonify(k)
-    return jsonify({"error":"key not found"}), 404
+    response = (
+        supabase
+        .table("license_keys")
+        .update({"status": "revoked"})
+        .eq("key", key)
+        .execute()
+    )
+
+    if not response.data:
+        return jsonify({"error": "key not found"}), 404
+
+    return jsonify(response.data[0])
+
 
 @app.post("/api/keys/<key>/reset-device")
 def reset_device(key):
-    data = load_db()
-    for k in data["keys"]:
-        if k["key"] == key:
-            k["device_id"] = None
-            save_db(data)
-            return jsonify(k)
-    return jsonify({"error":"key not found"}), 404
+    response = (
+        supabase
+        .table("license_keys")
+        .update({"device_id": None})
+        .eq("key", key)
+        .execute()
+    )
+
+    if not response.data:
+        return jsonify({"error": "key not found"}), 404
+
+    return jsonify(response.data[0])
+
 
 @app.post("/api/keys/validate")
 def validate():
     body = request.get_json(silent=True) or {}
-    key = body.get("key","").strip()
+
+    key = body.get("key", "").strip()
     device_id = body.get("device_id")
-    data = load_db()
-    for k in data["keys"]:
-        if k["key"] == key:
-            st = status(k)
-            if st != "active":
-                return jsonify({"valid":False,"status":st})
-            if k["device_id"] and device_id and k["device_id"] != device_id:
-                return jsonify({"valid":False,"status":"device_mismatch"})
-            if device_id and not k["device_id"]:
-                k["device_id"] = device_id
-            k["last_used"] = now().isoformat()
-            save_db(data)
-            return jsonify({"valid":True,"status":"active","expires_at":k["expires_at"]})
-    return jsonify({"valid":False,"status":"not_found"})
+
+    response = (
+        supabase
+        .table("license_keys")
+        .select("*")
+        .eq("key", key)
+        .limit(1)
+        .execute()
+    )
+
+    keys = response.data or []
+
+    if not keys:
+        return jsonify({
+            "valid": False,
+            "status": "not_found"
+        })
+
+    key_data = keys[0]
+    status = get_status(key_data)
+
+    if status != "active":
+        return jsonify({
+            "valid": False,
+            "status": status
+        })
+
+    if (
+        key_data["device_id"]
+        and device_id
+        and key_data["device_id"] != device_id
+    ):
+        return jsonify({
+            "valid": False,
+            "status": "device_mismatch"
+        })
+
+    update_data = {
+        "last_used": now().isoformat()
+    }
+
+    if device_id and not key_data["device_id"]:
+        update_data["device_id"] = device_id
+
+    supabase \
+        .table("license_keys") \
+        .update(update_data) \
+        .eq("key", key) \
+        .execute()
+
+    return jsonify({
+        "valid": True,
+        "status": "active",
+        "expires_at": key_data["expires_at"]
+    })
+
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000))
+    )
