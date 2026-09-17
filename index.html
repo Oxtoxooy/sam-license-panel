@@ -1,0 +1,74 @@
+
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SAM License Panel — Local Demo</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#0b1020;color:#e8ecf7}
+.wrap{max-width:1200px;margin:auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
+h1{margin:0;font-size:25px}.muted{color:#8e99b5}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.card,.panel{background:#121a2e;border:1px solid #26304a;border-radius:14px;padding:18px}.num{font-size:28px;font-weight:700;margin-top:8px}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0}.controls input,.controls select,.controls button{
+background:#18223a;color:#fff;border:1px solid #33405f;border-radius:9px;padding:10px 12px}
+button{cursor:pointer}.primary{background:#4f6cff!important;border-color:#4f6cff!important}
+table{width:100%;border-collapse:collapse}.panel{margin-top:18px;overflow:auto}
+th,td{text-align:left;padding:13px 10px;border-bottom:1px solid #252f49;white-space:nowrap}
+.badge{padding:5px 9px;border-radius:999px;font-size:12px}.active{background:#123c2b;color:#63e6a5}.expired{background:#3c3112;color:#ffd76a}.revoked{background:#3d1720;color:#ff8495}
+.action{padding:7px 9px;border-radius:7px;border:1px solid #394664;background:#18223a;color:#fff;margin-right:5px}
+@media(max-width:800px){.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="top"><div><h1>SAM License Panel</h1><div class="muted">Local license-management demo</div></div><div class="muted">REST API · localhost:5000</div></div>
+
+<div class="grid">
+<div class="card"><div class="muted">Total Keys</div><div id="total" class="num">0</div></div>
+<div class="card"><div class="muted">Active</div><div id="active" class="num">0</div></div>
+<div class="card"><div class="muted">Expired</div><div id="expired" class="num">0</div></div>
+<div class="card"><div class="muted">Revoked</div><div id="revoked" class="num">0</div></div>
+</div>
+
+<div class="panel">
+<h3>Generate Keys</h3>
+<div class="controls">
+<select id="duration"><option value="5">5 hours</option><option value="24" selected>1 day</option><option value="168">7 days</option><option value="720">30 days</option></select>
+<input id="qty" type="number" min="1" max="100" value="1">
+<button class="primary" onclick="generate()">Generate</button>
+</div>
+</div>
+
+<div class="panel">
+<h3>Keys</h3>
+<table><thead><tr><th>Key</th><th>Status</th><th>Expires</th><th>Countdown</th><th>Device</th><th>Actions</th></tr></thead>
+<tbody id="rows"></tbody></table>
+</div>
+</div>
+<script>
+let keys=[];
+const esc=s=>String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+function remaining(iso){let ms=new Date(iso)-Date.now();if(ms<=0)return "Expired";let s=Math.floor(ms/1000),d=Math.floor(s/86400);s%=86400;let h=Math.floor(s/3600);s%=3600;let m=Math.floor(s/60);s%=60;return `${d}d ${h}h ${m}m ${s}s`}
+async function load(){keys=await (await fetch('/api/keys')).json();render()}
+function render(){
+let counts={active:0,expired:0,revoked:0};keys.forEach(k=>counts[k.status]=(counts[k.status]||0)+1);
+document.getElementById('total').textContent=keys.length;document.getElementById('active').textContent=counts.active;
+document.getElementById('expired').textContent=counts.expired;document.getElementById('revoked').textContent=counts.revoked;
+document.getElementById('rows').innerHTML=keys.map(k=>`<tr>
+<td><b>${esc(k.key)}</b></td><td><span class="badge ${k.status}">${k.status}</span></td>
+<td>${new Date(k.expires_at).toLocaleString()}</td><td>${remaining(k.expires_at)}</td>
+<td>${esc(k.device_id||'Unbound')}</td>
+<td><button class="action" onclick="copyKey('${k.key}')">Copy</button>
+${k.status==='active'?`<button class="action" onclick="revoke('${k.key}')">Revoke</button>`:''}
+<button class="action" onclick="resetDevice('${k.key}')">Reset Device</button></td></tr>`).join('')
+}
+async function generate(){let duration_hours=+document.getElementById('duration').value,quantity=+document.getElementById('qty').value;
+await fetch('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_hours,quantity})});load()}
+async function revoke(k){await fetch('/api/keys/'+encodeURIComponent(k)+'/revoke',{method:'POST'});load()}
+async function resetDevice(k){await fetch('/api/keys/'+encodeURIComponent(k)+'/reset-device',{method:'POST'});load()}
+async function copyKey(k){await navigator.clipboard.writeText(k)}
+load();setInterval(load,1000);
+</script>
+</body>
+</html>
